@@ -1,26 +1,24 @@
-# FastAPI et serveur
-fastapi>=0.100.0,<0.110.0
-uvicorn[standard]>=0.20.0,<0.25.0
-python-multipart>=0.0.6
+# FastAPI & Server (pre-built wheels only)
+fastapi==0.100.1
+uvicorn[standard]==0.23.2
+python-multipart==0.0.6
 
-# CrewAI et Mistral AI
-crewai>=0.11.0,<0.12.0
-langchain>=0.1.0,<0.2.0
-mistralai>=0.0.13
-requests>=2.31.0
+# Core dependencies
+crewai==0.11.2
+langchain==0.1.7
+mistralai==0.0.13
 
-# Base de données
-sqlalchemy>=2.0.20,<2.1.0
-psycopg2-binary>=2.9.9
-redis>=4.5.0,<6.0.0
+# Database
+sqlalchemy==2.0.20
+psycopg2-binary==2.9.9
+redis==5.0.1
 
-# Utilitaires
-python-dotenv>=1.0.0
-pydantic>=2.0.0,<2.5.0
-pydantic-settings>=2.0.0
-
-# Requêtes HTTP
-httpx>=0.24.0,<0.26.0
+# Utilities (no Rust compilation)
+python-dotenv==1.0.0
+pydantic==2.4.2
+pydantic-settings==2.0.3
+requests==2.31.0
+httpx==0.24.1
 
 # Logging
-python-json-logger>=2.0.7
+python-json-logger==2.0.7
