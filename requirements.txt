@@ -1,26 +1,23 @@
 # FastAPI et serveur
-fastapi==0.135.2
-uvicorn[standard]==0.42.0
-python-multipart==0.0.22
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
 
 # CrewAI et Mistral AI
-crewai==0.11.2
-mistralai==0.1.3
-langchain-mistralai==1.1.2
+crewai==0.25.0
+mistralai==0.0.13
+langchain-mistralai==0.0.3
 
 # Base de données
-sqlalchemy==2.0.48
+sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 redis==5.0.1
 
 # Utilitaires
-python-dotenv==1.0.1
-pydantic==2.9.0
+python-dotenv==1.0.0
+pydantic==2.5.0
 pydantic-settings==2.1.0
 
 # Requêtes HTTP
-httpx==0.25.2
+httpx==0.25.1
 requests==2.31.0
-
-# Logging et monitoring
-python-json-logger==2.0.7
