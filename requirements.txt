@@ -15,9 +15,9 @@ redis==5.0.1
 
 # Utilitaires
 python-dotenv==1.0.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
+pydantic==2.4.2
+pydantic-settings==2.0.3
 
 # Requêtes HTTP
-httpx==0.25.1
+httpx==0.24.1
 requests==2.31.0
