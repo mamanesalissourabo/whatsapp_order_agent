@@ -1,12 +1,13 @@
 # FastAPI et serveur
-fastapi>=0.100.0,<0.106.0
+fastapi>=0.100.0,<0.110.0
 uvicorn[standard]>=0.20.0,<0.25.0
 python-multipart>=0.0.6
 
-# CrewAI et Mistral AI (use latest available versions)
+# CrewAI et Mistral AI
 crewai>=0.11.0,<0.12.0
+langchain>=0.1.0,<0.2.0
 mistralai>=0.0.13
-langchain>=0.0.300,<0.1.0
+requests>=2.31.0
 
 # Base de données
 sqlalchemy>=2.0.20,<2.1.0
@@ -20,7 +21,6 @@ pydantic-settings>=2.0.0
 
 # Requêtes HTTP
 httpx>=0.24.0,<0.26.0
-requests>=2.31.0
 
 # Logging
 python-json-logger>=2.0.7
