@@ -12,7 +12,6 @@ from schemas.sessions import ConversationSession, ConversationState
 
 logger = logging.getLogger(__name__)
 
-
 class SessionManager:
     """
     Gestionnaire de sessions conversationnelles stockées dans Redis.

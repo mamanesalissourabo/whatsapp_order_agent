@@ -3,6 +3,11 @@ Définition des agents CrewAI pour le système de prise de commandes WhatsApp.
 Chaque agent a un rôle spécifique dans le traitement des messages clients.
 """
 
+"""
+Définition des agents CrewAI pour le système de prise de commandes WhatsApp.
+Chaque agent a un rôle spécifique dans le traitement des messages clients.
+"""
+
 from crewai import Agent
 from langchain_mistralai import ChatMistralAI
 from config.settings import settings
@@ -12,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 def create_llm():
-    """Crée une instance du modèle Mistral AI."""
+    """Crée une instance du modèle Mistral AI avec configuration optimisée."""
     return ChatMistralAI(
         model=settings.mistral_model,
         api_key=settings.mistral_api_key,
         temperature=0.7,
+        max_tokens=2048,
     )
 
 

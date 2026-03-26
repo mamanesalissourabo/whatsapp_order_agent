@@ -15,6 +15,7 @@ from tools.session_manager import SessionManager
 from tools.whatsapp_sender import send_whatsapp_message
 from crew.crew_manager import get_crew_manager
 from tools import SearchProductsTool, AddToCartTool, RemoveFromCartTool, ViewCartTool
+from langchain_mistralai import ChatMistralAI
 
 # Configuration du logging
 logging.basicConfig(
@@ -171,13 +172,7 @@ async def process_incoming_message(
     profile_name: str = "",
 ) -> None:
     """
-    Traite un message WhatsApp entrant en arrière-plan.
-    
-    1. Récupère/crée la session
-    2. Ajoute le message à l'historique
-    3. Lance la Crew d'agents pour générer la réponse
-    4. Envoie la réponse via WhatsApp
-    5. Sauvegarde la session mise à jour
+    Traite un message WhatsApp entrant avec Mistral IA directement.
     """
     logger.info(f"📨 Traitement message de {phone_number} ({profile_name}): {message_text[:80]}")
     
@@ -193,28 +188,89 @@ async def process_incoming_message(
         session.add_message("user", message_text, settings.max_conversation_history)
         session_manager.save_session(session)
         
-        # 3. Préparer le contexte et lancer la Crew
-        context = session.get_context()
-        crew_manager = get_crew_manager()
+        # 3. Détecter les salutations
+        salutations = ["salut", "bonjour", "coucou", "hello", "hi", "hey", "ça va", "comment allez"]
+        is_greeting = any(greeting in message_text.lower() for greeting in salutations)
         
-        result = crew_manager.process_message(
-            message=message_text,
-            phone_number=phone_number,
-            context=context,
-        )
-        
-        response_text = result.get("message", "")
-        
-        if not response_text:
-            response_text = (
-                "😔 Désolé, je n'ai pas pu traiter votre demande. "
-                "Pouvez-vous reformuler?"
+        if is_greeting:
+            # Réponse de bienvenue personnalisée pour les points de vente
+            response_text = f"""Bienvenue sur Oulmes Order Agent! 👋
+
+Je suis votre assistant IA pour la prise de commandes Oulmes.
+
+Je peux vous aider à:
+✅ Découvrir nos produits disponibles
+✅ Gérer votre panier de commande
+✅ Suivre vos commandes
+✅ Répondre à vos questions
+
+Comment puis-je vous aider aujourd'hui?"""
+        else:
+            # 4. Générer une réponse avec Mistral IA
+            llm = ChatMistralAI(
+                model=settings.mistral_model,
+                api_key=settings.mistral_api_key,
+                temperature=0.7,
             )
+            
+            system_prompt = """Tu es l'Agent IA Oulmes pour les points de vente.
+Tu aides les points de vente à commander facilement les produits Oulmes.
+Tu es amical, utile et professionnel.
+IMPORTANT: Réponds DIRECTEMENT sans préambule, sans explications, juste la réponse pour le client.
+Réponds en français et sois concis."""
+            
+            history_text = "\n".join([
+                f"{msg['role'].upper()}: {msg['content']}" 
+                for msg in session.history[-6:]
+            ])
+            
+            full_prompt = f"""Historique:
+{history_text}
+
+Point de vente demande: {message_text}
+
+Réponds directement (sans préambule, sans "Voici une réponse"):"""
+            
+            response = llm.invoke(full_prompt)
+            response_text = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            
+            # Nettoyer le texte généré par Mistral
+            # Enlever les phrases du type "Voici une réponse...", "Ton naturel...", etc.
+            lines = response_text.split('\n')
+            cleaned_lines = []
+            skip_until_empty = False
+            
+            for line in lines:
+                line_lower = line.lower()
+                # Sauter les lignes d'explication
+                if any(phrase in line_lower for phrase in [
+                    "voici une réponse",
+                    "ton naturel",
+                    "proposition d'aide",
+                    "voici comment",
+                    "c'est important",
+                    "réponse directe",
+                    "explication"
+                ]):
+                    skip_until_empty = True
+                    continue
+                
+                if skip_until_empty and line.strip() == "":
+                    skip_until_empty = False
+                    continue
+                
+                if not skip_until_empty:
+                    cleaned_lines.append(line)
+            
+            response_text = '\n'.join(cleaned_lines).strip()
+            
+            if not response_text:
+                response_text = "Comment puis-je vous aider?"
         
-        # 4. Envoyer la réponse via WhatsApp
+        # 5. Envoyer la réponse via WhatsApp
         await send_whatsapp_message(to=phone_number, message=response_text)
         
-        # 5. Sauvegarder la réponse dans l'historique
+        # 6. Sauvegarder la réponse dans l'historique
         session.add_message("assistant", response_text, settings.max_conversation_history)
         session_manager.save_session(session)
         
