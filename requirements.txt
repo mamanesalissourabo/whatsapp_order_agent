@@ -6,7 +6,7 @@ python-multipart==0.0.6
 # Core dependencies
 crewai==0.11.2
 langchain==0.1.7
-mistralai==0.0.13
+mistralai==0.0.12
 
 # Database
 sqlalchemy==2.0.20
