@@ -88,14 +88,14 @@ L'API sera accessible sur : http://localhost:8001
 
 Documentation Swagger : http://localhost:8001/docs
 
-## Prochaines étapes
+## étapes
 
 1. ✅ Initialisation de la structure du projet
-2. ⏳ Configuration de l'application FastAPI
-3. ⏳ Création des agents CrewAI
-4. ⏳ Développement des outils d'accès à Selfcare
-5. ⏳ Implémentation du webhook WhatsApp
-6. ⏳ Tests et déploiement
+2. ✅ Configuration de l'application FastAPI
+3. ✅ Création des agents CrewAI
+4. ✅ Développement des outils d'accès aux base de donnees 
+5. ✅ Implémentation du webhook WhatsApp
+6. ✅ Tests et déploiement
 
 ## Technologies
 
