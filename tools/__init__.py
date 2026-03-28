@@ -1,16 +1,11 @@
 """
-Outils (Tools) pour les agents CrewAI.
-Ces outils permettent aux agents d'interagir avec les systèmes backend.
+Outils (Tools) pour l'application WhatsApp Order Agent.
 """
 
-from tools.product_search import SearchProductsTool
-from tools.cart_manager import AddToCartTool, RemoveFromCartTool, ViewCartTool
-from tools.whatsapp_sender import SendWhatsAppMessageTool
 from tools.session_manager import SessionManager
+from tools.whatsapp_sender import send_whatsapp_message
 
 __all__ = [
-    "SearchProductsTool",
-    "AddToCartTool", "RemoveFromCartTool", "ViewCartTool",
-    "SendWhatsAppMessageTool",
     "SessionManager",
+    "send_whatsapp_message",
 ]

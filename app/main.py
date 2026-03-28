@@ -13,9 +13,11 @@ from config.settings import settings
 from schemas.messages import WhatsAppWebhookPayload
 from tools.session_manager import SessionManager
 from tools.whatsapp_sender import send_whatsapp_message
-from crew.crew_manager import get_crew_manager
-from tools import SearchProductsTool, AddToCartTool, RemoveFromCartTool, ViewCartTool
-from langchain_mistralai import ChatMistralAI
+from tools.catalog_service import get_catalog_context, get_available_products_summary
+from tools.audio_transcriber import process_voice_message
+from database.catalog_db import init_catalog_db, seed_catalog
+from mistralai.client import MistralClient
+from mistralai.models.chat_completion import ChatMessage
 
 # Configuration du logging
 logging.basicConfig(
@@ -45,15 +47,10 @@ async def lifespan(app: FastAPI):
     redis_status = "✅ connecté" if session_manager.is_redis_available() else "⚠️ fallback mémoire"
     logger.info(f"🔑 Redis: {redis_status}")
     
-    # Initialiser la Crew avec les outils
-    tools = [
-        SearchProductsTool(),
-        AddToCartTool(),
-        RemoveFromCartTool(),
-        ViewCartTool(),
-    ]
-    get_crew_manager(tools=tools)
-    logger.info("🤖 CrewManager initialisé avec les outils")
+    # Initialiser et peupler le catalogue produits
+    init_catalog_db()
+    seed_catalog()
+    logger.info("📦 Catalogue produits initialisé")
     
     yield
     
@@ -152,6 +149,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 phone_number=msg_data["phone_number"],
                 message_text=msg_data["message_text"],
                 profile_name=msg_data["profile_name"],
+                message_type=msg_data.get("message_type", "text"),
+                media_id=msg_data.get("media_id", ""),
             )
         
         # Toujours retourner 200 immédiatement à Meta
@@ -170,13 +169,30 @@ async def process_incoming_message(
     phone_number: str,
     message_text: str,
     profile_name: str = "",
+    message_type: str = "text",
+    media_id: str = "",
 ) -> None:
     """
     Traite un message WhatsApp entrant avec Mistral IA directement.
+    Supporte les messages texte et vocaux.
     """
-    logger.info(f"📨 Traitement message de {phone_number} ({profile_name}): {message_text[:80]}")
+    logger.info(f"📨 Traitement message ({message_type}) de {phone_number} ({profile_name})")
     
     try:
+        # 0. Si message vocal, transcrire d'abord
+        if message_type == "audio" and media_id:
+            logger.info(f"🎤 Transcription vocale en cours pour {phone_number}...")
+            message_text = await process_voice_message(media_id)
+            
+            if not message_text:
+                await send_whatsapp_message(
+                    to=phone_number,
+                    message="Désolé, je n'ai pas pu comprendre ton message vocal 🎤\nEssaie de renvoyer ou écris-moi en texte."
+                )
+                return
+            
+            logger.info(f"🎤 Transcription: {message_text[:80]}")
+        
         # 1. Récupérer la session
         session = session_manager.get_session(phone_number)
         
@@ -189,50 +205,122 @@ async def process_incoming_message(
         session_manager.save_session(session)
         
         # 3. Détecter les salutations
-        salutations = ["salut", "bonjour", "coucou", "hello", "hi", "hey", "ça va", "comment allez"]
-        is_greeting = any(greeting in message_text.lower() for greeting in salutations)
+        salutations = ["salut", "bonjour", "coucou", "hello", "hi", "hey", "ça va", "comment allez", "salam", "slm"]
+        msg_lower = message_text.lower().strip()
+        msg_words = msg_lower.replace(",", " ").replace("!", " ").replace("?", " ").split()
+        is_greeting = any(greeting in msg_words for greeting in salutations) or msg_lower in salutations
         
         if is_greeting:
-            # Réponse de bienvenue personnalisée pour les points de vente
-            response_text = f"""Bienvenue sur Oulmes Order Agent! 👋
+            # Réponse de bienvenue avec marques disponibles
+            brands_summary = get_available_products_summary()
+            client_display = session.client_name or ""
+            
+            # Détecter si salutation en darija/arabe ou français
+            darija_greetings = ["salam", "slm"]
+            is_darija = any(g in msg_words for g in darija_greetings)
+            
+            if is_darija:
+                response_text = f"""Merhba {client_display}! 👋
 
-Je suis votre assistant IA pour la prise de commandes Oulmes.
+Ana l'assistant Oulmès, n9der n3awnk tchouf les produits o tcommandi directement mn hna.
 
-Je peux vous aider à:
-✅ Découvrir nos produits disponibles
-✅ Gérer votre panier de commande
-✅ Suivre vos commandes
-✅ Répondre à vos questions
+🏷️ Nos marques :
+{brands_summary}
 
-Comment puis-je vous aider aujourd'hui?"""
+Chnou bghiti tchouf ? 😊"""
+            else:
+                response_text = f"""Bienvenue {client_display} ! 👋
+
+Je suis l'assistant Oulmès, je peux t'aider à consulter nos produits et passer ta commande directement ici.
+
+🏷️ Nos marques :
+{brands_summary}
+
+Qu'est-ce qui t'intéresse ? 😊"""
         else:
             # 4. Générer une réponse avec Mistral IA
-            llm = ChatMistralAI(
+            client = MistralClient(api_key=settings.mistral_api_key)
+            
+            client_name = session.client_name or "client"
+            catalog = get_catalog_context()
+            
+            system_prompt = f"""# Rôle
+Tu es l'assistant IA de prise de commandes pour **Les Eaux Minérales d'Oulmès**.
+Tu communiques par WhatsApp avec des **points de vente** (épiceries, cafés, restaurants, supérettes) au Maroc.
+
+# Identité du client
+- Nom : {client_name}
+- Téléphone : {phone_number}
+
+{catalog}
+
+# IMPORTANT — Données produits
+- Utilise UNIQUEMENT les produits et prix listés ci-dessus
+- Ne jamais inventer de produits ou de prix
+- Si un produit n'est pas dans le catalogue, indique qu'il n'est pas disponible
+- Les prix sont en DH par unité de vente (caisse ou pack)
+
+# Tes capacités
+1. **Catalogue** : présenter les produits avec les prix RÉELS du catalogue
+2. **Commande** : aider le point de vente à constituer sa commande (produits, quantités)
+3. **Panier** : ajouter, modifier, supprimer des articles, afficher le récapitulatif avec total
+4. **Suivi** : donner le statut d'une commande existante
+5. **Questions** : répondre aux questions sur les produits, délais de livraison, promotions
+
+# Règles STRICTES
+- **Langue** : détecte la langue du client et réponds TOUJOURS dans la même langue :
+  - Si le client écrit en **darija marocaine** (ex: "bghit", "3afak", "chhal", "wach"), réponds **100% en darija**. Ne mélange JAMAIS avec du français. Pas de "Voici", "Commande en cours", etc.
+  - Si le client écrit en **français**, réponds **100% en français**
+  - Si le client écrit en **arabe classique**, réponds en **arabe**
+  - Par défaut, utilise le **français**
+  - **INTERDIT** de changer de langue en cours de conversation. Si le client parle darija, TOUT ton message doit être en darija.
+- Sois **concis** : messages courts adaptés à WhatsApp (pas de pavés)
+- Utilise des **emojis** avec modération (1-3 par message)
+- **Jamais** de préambule type "Voici ma réponse", "Bien sûr", "En tant qu'assistant"
+- Va **droit au but** : commence directement par l'information utile
+- Quand tu listes des produits, inclus toujours le **prix** et l'**unité de vente**
+
+# Ajout au panier
+- Quand le client commande un produit, dis que la commande a été **ajoutée** (pas "en cours")
+  - En darija : "Tzadet f le panier dyalk ✅" ou "T7attet f la commande ✅"
+  - En français : "Ajouté à ta commande ✅"
+- **TOUJOURS afficher le total** après chaque ajout (ex: "Total : 126.00 DH" ou "Lmajmou3 : 126.00 DH")
+- Après l'ajout, demande s'il veut ajouter autre chose (dans la langue du client)
+  - En darija : "Bghiti tzid chi 7aja khra ?"
+  - En français : "Tu veux ajouter autre chose ?"
+- Ne dis JAMAIS "Kif dayr" ou d'autres phrases hors contexte
+- Quand tu listes des produits pour un client qui parle **darija**, n'utilise PAS "Voici les produits". Dis plutôt "Hak les produits" ou "3ndna f Bahia :"
+- Les codes produits (ex: BAH-033-MIX) sont internes, ne les affiche PAS au client
+- Termine par une **question** pour guider le client vers l'étape suivante
+- Ne répète pas le message du client dans ta réponse
+
+# Ton
+Professionnel mais chaleureux. Tu tutoies le client. Tu es efficace et orienté action.
+
+# Fin de commande
+Quand le client indique qu'il a fini sa commande (ex: "c'est bon", "non merci", "c'est tout", "khalas", "safi", "mzyan", "aked"), tu DOIS :
+1. Récapituler la commande complète avec le total — DANS LA LANGUE DU CLIENT :
+   - En darija : "La commande dyalk :" (PAS "Commande récapitulative", PAS "Récapitulatif")
+   - En français : "Récapitulatif de ta commande :"
+2. Afficher le total :
+   - En darija : "Lmajmou3 : 210.00 DH" (PAS "Total")
+   - En français : "Total : 210.00 DH"
+3. Remercier : darija → "Choukran 3la la commande !" / français → "Merci pour ta commande !"
+4. Rassurer : darija → "Ghadi tittraita f a9rab wa9t 🚚" / français → "Ta commande va être traitée dans les plus brefs délais 🚚"
+5. Proposer de revenir : darija → "Ila 7tajiti chi 7aja, rje3 liya!" / français → "Si tu as besoin d'aide, n'hésite pas !"
+6. Souhaiter bonne journée : darija → "Nhar sa3id! 😊" / français → "Bonne journée ! 😊"
+IMPORTANT : AUCUN mot français dans un message darija. Pas de "Commande", "Récapitulatif", "Total", "Ajouté"."""
+            
+            messages = [ChatMessage(role="system", content=system_prompt)]
+            for msg in session.history[-6:]:
+                messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
+            
+            response = client.chat(
                 model=settings.mistral_model,
-                api_key=settings.mistral_api_key,
-                temperature=0.7,
+                messages=messages,
+                temperature=0.5,
             )
-            
-            system_prompt = """Tu es l'Agent IA Oulmes pour les points de vente.
-Tu aides les points de vente à commander facilement les produits Oulmes.
-Tu es amical, utile et professionnel.
-IMPORTANT: Réponds DIRECTEMENT sans préambule, sans explications, juste la réponse pour le client.
-Réponds en français et sois concis."""
-            
-            history_text = "\n".join([
-                f"{msg['role'].upper()}: {msg['content']}" 
-                for msg in session.history[-6:]
-            ])
-            
-            full_prompt = f"""Historique:
-{history_text}
-
-Point de vente demande: {message_text}
-
-Réponds directement (sans préambule, sans "Voici une réponse"):"""
-            
-            response = llm.invoke(full_prompt)
-            response_text = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            response_text = response.choices[0].message.content.strip()
             
             # Nettoyer le texte généré par Mistral
             # Enlever les phrases du type "Voici une réponse...", "Ton naturel...", etc.

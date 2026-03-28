@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     mistral_api_key: str
     mistral_model: str = "mistral-small-latest"
     
+    # Configuration Groq (Whisper transcription vocale)
+    groq_api_key: str = ""
+    
     # Configuration WhatsApp Business API
     whatsapp_access_token: str
     whatsapp_verify_token: str

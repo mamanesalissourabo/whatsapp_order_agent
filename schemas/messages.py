@@ -72,11 +72,24 @@ class WhatsAppWebhookPayload(BaseModel):
                 }
 
                 for msg in raw_messages:
-                    if msg.get("type") == "text":
-                        phone = msg.get("from", "")
+                    phone = msg.get("from", "")
+                    msg_type = msg.get("type", "")
+                    
+                    if msg_type == "text":
                         messages.append({
                             "phone_number": phone,
                             "message_text": msg.get("text", {}).get("body", ""),
+                            "message_type": "text",
+                            "message_id": msg.get("id", ""),
+                            "profile_name": contact_map.get(phone, ""),
+                            "timestamp": msg.get("timestamp", ""),
+                        })
+                    elif msg_type == "audio":
+                        messages.append({
+                            "phone_number": phone,
+                            "message_text": "",
+                            "message_type": "audio",
+                            "media_id": msg.get("audio", {}).get("id", ""),
                             "message_id": msg.get("id", ""),
                             "profile_name": contact_map.get(phone, ""),
                             "timestamp": msg.get("timestamp", ""),

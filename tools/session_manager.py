@@ -20,20 +20,21 @@ class SessionManager:
 
     def __init__(self):
         """Initialise la connexion Redis."""
+        self._memory_store: dict = {}
+        self.ttl = settings.redis_session_ttl
         try:
             self.redis_client = redis.from_url(
                 settings.redis_url,
                 decode_responses=True,
             )
-            self.ttl = settings.redis_session_ttl
+            # Tester la connexion réellement
+            self.redis_client.ping()
             logger.info(f"✅ SessionManager connecté à Redis: {settings.redis_url}")
         except Exception as e:
             logger.warning(
                 f"⚠️ Redis indisponible ({e}). Utilisation du stockage mémoire."
             )
             self.redis_client = None
-            self._memory_store: dict = {}
-            self.ttl = settings.redis_session_ttl
 
     def _session_key(self, phone_number: str) -> str:
         """Génère la clé Redis pour une session."""
@@ -92,7 +93,9 @@ class SessionManager:
             logger.debug(f"💾 Session sauvegardée pour {session.phone_number}")
 
         except Exception as e:
-            logger.error(f"❌ Erreur sauvegarde session: {e}")
+            logger.warning(f"⚠️ Redis sauvegarde échouée, fallback mémoire: {e}")
+            self.redis_client = None
+            self._memory_store[key] = session.to_redis_dict()
 
     def delete_session(self, phone_number: str) -> None:
         """Supprime la session d'un utilisateur."""
