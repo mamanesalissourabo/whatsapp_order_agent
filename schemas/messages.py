@@ -94,6 +94,34 @@ class WhatsAppWebhookPayload(BaseModel):
                             "profile_name": contact_map.get(phone, ""),
                             "timestamp": msg.get("timestamp", ""),
                         })
+                    elif msg_type == "interactive":
+                        interactive = msg.get("interactive", {})
+                        interactive_type = interactive.get("type", "")
+                        
+                        if interactive_type == "list_reply":
+                            reply = interactive.get("list_reply", {})
+                            messages.append({
+                                "phone_number": phone,
+                                "message_text": reply.get("title", ""),
+                                "message_type": "interactive",
+                                "interactive_type": "list_reply",
+                                "interactive_id": reply.get("id", ""),
+                                "message_id": msg.get("id", ""),
+                                "profile_name": contact_map.get(phone, ""),
+                                "timestamp": msg.get("timestamp", ""),
+                            })
+                        elif interactive_type == "button_reply":
+                            reply = interactive.get("button_reply", {})
+                            messages.append({
+                                "phone_number": phone,
+                                "message_text": reply.get("title", ""),
+                                "message_type": "interactive",
+                                "interactive_type": "button_reply",
+                                "interactive_id": reply.get("id", ""),
+                                "message_id": msg.get("id", ""),
+                                "profile_name": contact_map.get(phone, ""),
+                                "timestamp": msg.get("timestamp", ""),
+                            })
         return messages
 
 

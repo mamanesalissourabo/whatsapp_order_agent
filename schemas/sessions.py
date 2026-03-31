@@ -35,6 +35,7 @@ class ConversationSession(BaseModel):
     client_id: Optional[int] = Field(None, description="ID client Selfcare")
     client_name: Optional[str] = Field(None, description="Nom du client")
     cart: Dict[str, Any] = Field(default_factory=dict, description="Panier sérialisé")
+    pending_product: Optional[str] = Field(None, description="Code produit en attente de quantité")
     history: List[Dict[str, str]] = Field(default_factory=list, description="Historique de conversation")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

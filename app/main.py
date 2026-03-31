@@ -12,8 +12,12 @@ from contextlib import asynccontextmanager
 from config.settings import settings
 from schemas.messages import WhatsAppWebhookPayload
 from tools.session_manager import SessionManager
-from tools.whatsapp_sender import send_whatsapp_message
-from tools.catalog_service import get_catalog_context, get_available_products_summary
+from tools.whatsapp_sender import send_whatsapp_message, send_whatsapp_interactive_list, send_whatsapp_buttons
+from tools.catalog_service import (
+    get_catalog_context, get_available_products_summary,
+    get_brands_for_interactive, get_products_by_brand_for_interactive,
+    get_product_details_by_code,
+)
 from tools.audio_transcriber import process_voice_message
 from database.catalog_db import init_catalog_db, seed_catalog
 from mistralai.client import MistralClient
@@ -151,6 +155,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 profile_name=msg_data["profile_name"],
                 message_type=msg_data.get("message_type", "text"),
                 media_id=msg_data.get("media_id", ""),
+                interactive_type=msg_data.get("interactive_type", ""),
+                interactive_id=msg_data.get("interactive_id", ""),
             )
         
         # Toujours retourner 200 immédiatement à Meta
@@ -165,18 +171,363 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         )
 
 
+async def _handle_interactive_reply(
+    phone_number: str,
+    session,
+    interactive_type: str,
+    interactive_id: str,
+    display_text: str,
+) -> None:
+    """
+    Gère les réponses interactives : sélection de marque ou de produit.
+    """
+    logger.info(f"🔘 Interactive {interactive_type}: id={interactive_id} texte={display_text}")
+
+    try:
+        # ── Sélection d'une marque ──
+        if interactive_id.startswith("brand_"):
+            brand_name = interactive_id.replace("brand_", "")
+            sections = get_products_by_brand_for_interactive(brand_name)
+
+            if sections:
+                await send_whatsapp_interactive_list(
+                    to=phone_number,
+                    header=f"{brand_name}",
+                    body=f"Voici les produits {brand_name} disponibles 👇\nChoisis un produit pour l'ajouter à ta commande.",
+                    button_text="Voir les produits",
+                    sections=sections,
+                    footer="Prix en DH par unité de vente",
+                )
+                response_text = f"Produits {brand_name} affichés"
+            else:
+                response_text = f"Aucun produit disponible pour {brand_name} actuellement."
+                await send_whatsapp_message(to=phone_number, message=response_text)
+
+            session.add_message("assistant", response_text, settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+
+        # ── Sélection d'un produit avec quantité (add_{code}_{qty}) ──
+        if interactive_id.startswith("add_"):
+            parts = interactive_id.split("_", 1)[1]  # code_qty
+            # Le code peut contenir des _, la quantité est le dernier segment
+            last_underscore = parts.rfind("_")
+            product_code = parts[:last_underscore]
+            quantity = int(parts[last_underscore + 1:])
+            product = get_product_details_by_code(product_code)
+
+            if product:
+                code = product["code"]
+                if code in session.cart:
+                    session.cart[code]["quantity"] += quantity
+                else:
+                    session.cart[code] = {
+                        "nom": product["nom"],
+                        "prix": product["prix_unite"],
+                        "unite": product["unite_vente"],
+                        "quantity": quantity,
+                    }
+                qty = session.cart[code]["quantity"]
+                total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                response_text = (
+                    f"✅ {quantity}x {product['nom']} ajouté !\n"
+                    f"Total article : {qty}x — {product['prix_unite'] * qty:.2f} DH\n"
+                    f"🛒 Total panier : {total_cart:.2f} DH"
+                )
+                await send_whatsapp_buttons(
+                    to=phone_number,
+                    body=response_text,
+                    buttons=[
+                        {"id": "show_catalog", "title": "📦 Catalogue"},
+                        {"id": "show_cart", "title": "🛒 Mon panier"},
+                    ],
+                )
+            else:
+                response_text = "Ce produit n'est plus disponible."
+                await send_whatsapp_message(to=phone_number, message=response_text)
+
+            session.add_message("assistant", response_text, settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+
+        # ── Sélection d'un produit sans quantité (marques à >5 produits) ──
+        if interactive_id.startswith("product_"):
+            product_code = interactive_id.replace("product_", "")
+            product = get_product_details_by_code(product_code)
+
+            if product:
+                code = product["code"]
+                # Ajouter 1 unité par défaut + boutons quantité
+                if code in session.cart:
+                    session.cart[code]["quantity"] += 1
+                else:
+                    session.cart[code] = {
+                        "nom": product["nom"],
+                        "prix": product["prix_unite"],
+                        "unite": product["unite_vente"],
+                        "quantity": 1,
+                    }
+                qty = session.cart[code]["quantity"]
+                total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                response_text = (
+                    f"✅ {product['nom']} ajouté !\n"
+                    f"Quantité : {qty} | {product['prix_unite'] * qty:.2f} DH\n"
+                    f"🛒 Total panier : {total_cart:.2f} DH"
+                )
+                await send_whatsapp_buttons(
+                    to=phone_number,
+                    body=response_text,
+                    buttons=[
+                        {"id": f"cart_plus_{code}", "title": "➕ Ajouter 1"},
+                        {"id": f"cart_minus_{code}", "title": "➖ Retirer 1"},
+                        {"id": "show_catalog", "title": "📦 Catalogue"},
+                    ],
+                )
+            else:
+                response_text = "Ce produit n'est plus disponible."
+                await send_whatsapp_message(to=phone_number, message=response_text)
+
+            session.add_message("assistant", response_text, settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+
+        # ── Bouton "Voir le catalogue" ──
+        if interactive_id == "show_catalog":
+            brands_rows = get_brands_for_interactive()
+            if brands_rows:
+                sections = [{"title": "Marques disponibles", "rows": brands_rows}]
+                await send_whatsapp_interactive_list(
+                    to=phone_number,
+                    body="Choisis une marque pour voir les produits disponibles 👇",
+                    button_text="Nos marques 🏷️",
+                    sections=sections,
+                    footer="Produits en stock uniquement",
+                )
+            return
+
+        # ── Bouton "Voir mon panier" ──
+        if interactive_id == "show_cart":
+            await _send_cart_detail(phone_number, session)
+            return
+
+        # ── Confirmer la commande ──
+        if interactive_id == "confirm_order":
+            if session.cart:
+                lines = ["✅ *Commande confirmée !*\n"]
+                total = 0.0
+                for code, item in session.cart.items():
+                    subtotal = item["prix"] * item["quantity"]
+                    total += subtotal
+                    lines.append(f"• {item['quantity']}x {item['nom']} — {subtotal:.2f} DH")
+                lines.append(f"\n💰 *Total : {total:.2f} DH*")
+                lines.append("\nMerci pour ta commande ! 🎉")
+                lines.append("Ta commande va être traitée dans les plus brefs délais 🚚")
+                lines.append("Si tu as besoin d'aide, n'hésite pas !")
+                resp = "\n".join(lines)
+                await send_whatsapp_message(to=phone_number, message=resp)
+                session.cart = {}  # Vider le panier
+                session.add_message("assistant", resp, settings.max_conversation_history)
+                session_manager.save_session(session)
+            return
+
+        # ── Annuler la commande ──
+        if interactive_id == "cancel_order":
+            session.cart = {}
+            resp = "🗑️ Commande annulée. Ton panier est vide.\nTape *catalogue* ou dis *salut* pour recommencer !"
+            await send_whatsapp_message(to=phone_number, message=resp)
+            session.add_message("assistant", resp, settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+
+        # ── Modifier la commande (afficher les articles pour modification) ──
+        if interactive_id == "modify_order":
+            if session.cart:
+                rows = []
+                for code, item in session.cart.items():
+                    subtotal = item["prix"] * item["quantity"]
+                    rows.append({
+                        "id": f"cart_edit_{code}",
+                        "title": item["nom"][:24],
+                        "description": f"{item['quantity']}x — {subtotal:.2f} DH"[:72],
+                    })
+                sections = [{"title": "Modifier un article", "rows": rows}]
+                await send_whatsapp_interactive_list(
+                    to=phone_number,
+                    body="Choisis l'article à modifier 👇",
+                    button_text="Mes articles",
+                    sections=sections,
+                )
+            return
+
+        # ── Boutons modification panier : +1 / -1 / supprimer ──
+        if interactive_id.startswith("cart_plus_"):
+            code = interactive_id.replace("cart_plus_", "")
+            if code in session.cart:
+                session.cart[code]["quantity"] += 1
+                item = session.cart[code]
+                total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                resp = (
+                    f"➕ {item['nom']}\n"
+                    f"Quantité : {item['quantity']} | {item['prix'] * item['quantity']:.2f} DH\n"
+                    f"🛒 Total panier : {total_cart:.2f} DH"
+                )
+                await send_whatsapp_buttons(
+                    to=phone_number,
+                    body=resp,
+                    buttons=[
+                        {"id": f"cart_plus_{code}", "title": "➕ Ajouter 1"},
+                        {"id": f"cart_minus_{code}", "title": "➖ Retirer 1"},
+                        {"id": "show_catalog", "title": "📦 Catalogue"},
+                    ],
+                )
+                session.add_message("assistant", resp, settings.max_conversation_history)
+                session_manager.save_session(session)
+            return
+
+        if interactive_id.startswith("cart_minus_"):
+            code = interactive_id.replace("cart_minus_", "")
+            if code in session.cart:
+                session.cart[code]["quantity"] -= 1
+                if session.cart[code]["quantity"] <= 0:
+                    removed = session.cart.pop(code)
+                    total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                    resp = f"🗑️ {removed['nom']} supprimé du panier\n🛒 Total : {total_cart:.2f} DH"
+                    await send_whatsapp_buttons(
+                        to=phone_number,
+                        body=resp,
+                        buttons=[
+                            {"id": "show_catalog", "title": "📦 Catalogue"},
+                            {"id": "show_cart", "title": "🛒 Mon panier"},
+                        ],
+                    )
+                else:
+                    item = session.cart[code]
+                    total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                    resp = (
+                        f"➖ {item['nom']}\n"
+                        f"Quantité : {item['quantity']} | {item['prix'] * item['quantity']:.2f} DH\n"
+                        f"🛒 Total panier : {total_cart:.2f} DH"
+                    )
+                    await send_whatsapp_buttons(
+                        to=phone_number,
+                        body=resp,
+                        buttons=[
+                            {"id": f"cart_plus_{code}", "title": "➕ Ajouter 1"},
+                            {"id": f"cart_minus_{code}", "title": "➖ Retirer 1"},
+                            {"id": "show_catalog", "title": "📦 Catalogue"},
+                        ],
+                    )
+                session.add_message("assistant", resp, settings.max_conversation_history)
+                session_manager.save_session(session)
+            return
+
+        if interactive_id.startswith("cart_del_"):
+            code = interactive_id.replace("cart_del_", "")
+            if code in session.cart:
+                removed = session.cart.pop(code)
+                total_cart = sum(i["prix"] * i["quantity"] for i in session.cart.values())
+                resp = f"🗑️ {removed['nom']} supprimé du panier\n🛒 Total : {total_cart:.2f} DH"
+                await send_whatsapp_message(to=phone_number, message=resp)
+                session.add_message("assistant", resp, settings.max_conversation_history)
+                session_manager.save_session(session)
+            return
+
+        # ── Sélection d'un article du panier pour modification ──
+        if interactive_id.startswith("cart_edit_"):
+            code = interactive_id.replace("cart_edit_", "")
+            if code in session.cart:
+                await _send_cart_action_buttons(phone_number, code, session.cart[code])
+            return
+
+    except Exception as e:
+        logger.error(f"❌ Erreur traitement interactif: {e}", exc_info=True)
+        await send_whatsapp_message(
+            to=phone_number,
+            message="😔 Désolé, un problème est survenu. Réessaie dans quelques instants."
+        )
+
+
+async def _send_cart_detail(phone_number: str, session) -> None:
+    """Affiche le panier en UN SEUL message bouton avec recap + 3 actions."""
+    if not session.cart:
+        await send_whatsapp_message(to=phone_number, message="🛒 Ton panier est vide.\nTape *catalogue* pour voir nos produits !")
+        return
+
+    lines = ["🛒 *Ton panier :*\n"]
+    total = 0.0
+    for code, item in session.cart.items():
+        subtotal = item["prix"] * item["quantity"]
+        total += subtotal
+        lines.append(f"• {item['quantity']}x {item['nom']} — {subtotal:.2f} DH")
+    lines.append(f"\n💰 *Total : {total:.2f} DH*")
+    body_text = "\n".join(lines)
+
+    await send_whatsapp_buttons(
+        to=phone_number,
+        body=body_text,
+        buttons=[
+            {"id": "confirm_order", "title": "✅ Confirmer"},
+            {"id": "modify_order", "title": "✏️ Modifier"},
+            {"id": "cancel_order", "title": "❌ Annuler"},
+        ],
+    )
+
+    session.add_message("assistant", body_text, settings.max_conversation_history)
+    session_manager.save_session(session)
+
+
+async def _send_cart_action_buttons(phone_number: str, code: str, item: dict) -> None:
+    """Envoie les boutons +1 / -1 / Supprimer pour un article du panier."""
+    await send_whatsapp_buttons(
+        to=phone_number,
+        body=f"{item['nom']}\nQuantité : {item['quantity']}",
+        buttons=[
+            {"id": f"cart_plus_{code}", "title": "➕ Ajouter 1"},
+            {"id": f"cart_minus_{code}", "title": "➖ Retirer 1"},
+            {"id": f"cart_del_{code}", "title": "🗑️ Supprimer"},
+        ],
+    )
+
+async def _send_catalog_buttons(phone_number: str) -> None:
+    """Envoie les boutons 'Voir le catalogue' et 'Mon panier' après un ajout."""
+    await send_whatsapp_buttons(
+        to=phone_number,
+        body="Que veux-tu faire ?",
+        buttons=[
+            {"id": "show_catalog", "title": "📦 Catalogue"},
+            {"id": "show_cart", "title": "🛒 Mon panier"},
+        ],
+    )
+
+
+def _format_cart_for_prompt(cart: dict) -> str:
+    """Formate le panier pour injection dans le system prompt Mistral."""
+    if not cart:
+        return "Panier vide."
+    lines = []
+    total = 0.0
+    for code, item in cart.items():
+        subtotal = item["prix"] * item["quantity"]
+        total += subtotal
+        lines.append(f"- {item['quantity']}x {item['nom']} — {subtotal:.2f} DH")
+    lines.append(f"Total : {total:.2f} DH")
+    return "\n".join(lines)
+
+
 async def process_incoming_message(
     phone_number: str,
     message_text: str,
     profile_name: str = "",
     message_type: str = "text",
     media_id: str = "",
+    interactive_type: str = "",
+    interactive_id: str = "",
 ) -> None:
     """
     Traite un message WhatsApp entrant avec Mistral IA directement.
-    Supporte les messages texte et vocaux.
+    Supporte les messages texte, vocaux et interactifs (listes, boutons).
     """
-    logger.info(f"📨 Traitement message ({message_type}) de {phone_number} ({profile_name})")
+    logger.info(f"📨 Traitement message ({message_type}/{interactive_type or 'N/A'}) de {phone_number} ({profile_name})")
     
     try:
         # 0. Si message vocal, transcrire d'abord
@@ -204,15 +555,96 @@ async def process_incoming_message(
         session.add_message("user", message_text, settings.max_conversation_history)
         session_manager.save_session(session)
         
+        # ── 2b. Traiter les réponses interactives (sélection liste / bouton) ──
+        if message_type == "interactive" and interactive_id:
+            await _handle_interactive_reply(
+                phone_number, session, interactive_type, interactive_id, message_text
+            )
+            return
+        
+        # ── 2c. Produit en attente de quantité ──
+        if session.pending_product and message_text.strip().isdigit():
+            quantity = int(message_text.strip())
+            product = get_product_details_by_code(session.pending_product)
+            session.pending_product = None  # Réinitialiser
+
+            if product and quantity > 0:
+                # Ajouter au panier
+                code = product["code"]
+                if code in session.cart:
+                    session.cart[code]["quantity"] += quantity
+                else:
+                    session.cart[code] = {
+                        "nom": product["nom"],
+                        "prix": product["prix_unite"],
+                        "unite": product["unite_vente"],
+                        "quantity": quantity,
+                    }
+
+                total_item = product["prix_unite"] * quantity
+                total_cart = sum(
+                    item["prix"] * item["quantity"]
+                    for item in session.cart.values()
+                )
+
+                response_text = (
+                    f"✅ Ajouté : {quantity}x {product['nom']} — {total_item:.2f} DH\n"
+                    f"🛒 Total panier : {total_cart:.2f} DH"
+                )
+                await send_whatsapp_message(to=phone_number, message=response_text)
+                await _send_catalog_buttons(phone_number)
+            else:
+                response_text = "Quantité invalide ou produit indisponible. Réessaie."
+                await send_whatsapp_message(to=phone_number, message=response_text)
+
+            session.add_message("assistant", response_text, settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+        
+        # ── 2d. Détection d'intention : catalogue / panier / commande ──
+        msg_lower = message_text.lower().strip()
+        
+        # Mots-clés catalogue (même en phrase complète)
+        catalog_triggers = ["catalogue", "catalog", "produits", "marques", "menu",
+                            "voir les produits", "voir les marques", "vos produits",
+                            "vos marques", "qu'est-ce que vous avez", "qu'avez-vous",
+                            "chnou 3ndkom", "chnou kayn", "ach kayn", "les produits"]
+        if any(trigger in msg_lower for trigger in catalog_triggers):
+            brands_rows = get_brands_for_interactive()
+            if brands_rows:
+                sections = [{"title": "Marques disponibles", "rows": brands_rows}]
+                await send_whatsapp_interactive_list(
+                    to=phone_number,
+                    body="Voici nos marques disponibles 👇\nChoisis-en une pour voir les produits en stock.",
+                    button_text="Nos marques 🏷️",
+                    sections=sections,
+                    footer="Produits en stock uniquement",
+                )
+            session.add_message("assistant", "Catalogue affiché", settings.max_conversation_history)
+            session_manager.save_session(session)
+            return
+        
+        # Mots-clés panier
+        panier_triggers = ["panier", "cart", "mon panier", "le panier", "voir ma commande",
+                           "récap", "recapitulatif", "ma commande", "l panier", "le panier dyali"]
+        if any(trigger in msg_lower for trigger in panier_triggers):
+            await _send_cart_detail(phone_number, session)
+            return
+        
+        # Mots-clés confirmer commande
+        confirm_triggers = ["confirmer", "valider", "c'est bon", "c'est tout", "safi",
+                            "khalas", "aked", "confirme"]
+        if any(trigger in msg_lower for trigger in confirm_triggers) and session.cart:
+            await _send_cart_detail(phone_number, session)
+            return
+        
         # 3. Détecter les salutations
         salutations = ["salut", "bonjour", "coucou", "hello", "hi", "hey", "ça va", "comment allez", "salam", "slm"]
-        msg_lower = message_text.lower().strip()
         msg_words = msg_lower.replace(",", " ").replace("!", " ").replace("?", " ").split()
         is_greeting = any(greeting in msg_words for greeting in salutations) or msg_lower in salutations
         
         if is_greeting:
-            # Réponse de bienvenue avec marques disponibles
-            brands_summary = get_available_products_summary()
+            # Réponse de bienvenue + liste interactive des marques
             client_display = session.client_name or ""
             
             # Détecter si salutation en darija/arabe ou français
@@ -220,23 +652,42 @@ async def process_incoming_message(
             is_darija = any(g in msg_words for g in darija_greetings)
             
             if is_darija:
-                response_text = f"""Merhba {client_display}! 👋
-
-Ana l'assistant Oulmès, n9der n3awnk tchouf les produits o tcommandi directement mn hna.
-
-🏷️ Nos marques :
-{brands_summary}
-
-Chnou bghiti tchouf ? 😊"""
+                welcome_body = (
+                    f"Merhba {client_display}! 👋\n\n"
+                    "Ana l'assistant Oulmès, n9der n3awnk tchouf les produits "
+                    "o tcommandi directement mn hna.\n\n"
+                    "Chouf les marques dyalna 👇"
+                )
+                button_text = "Nos marques 🏷️"
             else:
-                response_text = f"""Bienvenue {client_display} ! 👋
-
-Je suis l'assistant Oulmès, je peux t'aider à consulter nos produits et passer ta commande directement ici.
-
-🏷️ Nos marques :
-{brands_summary}
-
-Qu'est-ce qui t'intéresse ? 😊"""
+                welcome_body = (
+                    f"Bienvenue {client_display} ! 👋\n\n"
+                    "Je suis l'assistant Oulmès, je peux t'aider à consulter "
+                    "nos produits et passer ta commande.\n\n"
+                    "Découvre nos marques 👇"
+                )
+                button_text = "Nos marques 🏷️"
+            
+            brands_rows = get_brands_for_interactive()
+            if brands_rows:
+                sections = [{"title": "Marques disponibles", "rows": brands_rows}]
+                await send_whatsapp_interactive_list(
+                    to=phone_number,
+                    body=welcome_body,
+                    button_text=button_text,
+                    sections=sections,
+                    footer="Choisis une marque pour voir les produits",
+                )
+                response_text = welcome_body
+            else:
+                response_text = welcome_body + "\n\n⚠️ Catalogue indisponible."
+                await send_whatsapp_message(to=phone_number, message=response_text)
+            
+            # Sauvegarder dans l'historique
+            session.add_message("assistant", response_text, settings.max_conversation_history)
+            session_manager.save_session(session)
+            logger.info(f"✅ Message de bienvenue interactif envoyé à {phone_number}")
+            return
         else:
             # 4. Générer une réponse avec Mistral IA
             client = MistralClient(api_key=settings.mistral_api_key)
@@ -254,11 +705,16 @@ Tu communiques par WhatsApp avec des **points de vente** (épiceries, cafés, re
 
 {catalog}
 
+# PANIER ACTUEL DU CLIENT
+{_format_cart_for_prompt(session.cart)}
+
 # IMPORTANT — Données produits
 - Utilise UNIQUEMENT les produits et prix listés ci-dessus
 - Ne jamais inventer de produits ou de prix
 - Si un produit n'est pas dans le catalogue, indique qu'il n'est pas disponible
 - Les prix sont en DH par unité de vente (caisse ou pack)
+- Le client peut parcourir le catalogue interactif en tapant "catalogue"
+- S'il demande un produit qui n'existe pas, suggère-lui de taper "catalogue" pour voir les produits disponibles
 
 # Tes capacités
 1. **Catalogue** : présenter les produits avec les prix RÉELS du catalogue
